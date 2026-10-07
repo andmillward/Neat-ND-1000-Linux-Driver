@@ -75,6 +75,27 @@ with `CHECK - scan error` in the name.
 | `skip_blank` / `blank_threshold` | `true` / `0.1` | drop sides with less than 0.1 % dark pixels |
 | `jpeg_quality` | `80` | JPEG quality of the pages in the PDF |
 | `pause_scale` | `1.0` | experimental: replay the Windows driver's fixed pauses shorter. `0.5` worked well in testing (about 13 s per sheet instead of 15-16 s) |
+| `levels` | none | per-chip correction for uneven calibration, see below |
+
+### Per-chip levels
+
+Each side is read by three sensor chips, one per third of the page. If one third looks
+brighter, washed out or tinted, measure each chip's black point (darkest text, e.g. the
+0.5th percentile) and white point (paper, e.g. the 90th percentile) per channel on a few
+scanned pages, and enter them; each third is then mapped to black 10 / white 245.
+Thirds or sides you leave out are not changed.
+
+```json
+"levels": {
+  "front": {
+    "left":   {"black": [0, 0, 0],       "white": [255, 255, 255]},
+    "middle": {"black": [112, 101, 99],  "white": [251, 249, 251]},
+    "right":  {"black": [113, 104, 104], "white": [250, 248, 251]}
+  }
+}
+```
+
+(These are the values from the scanner this was developed on; yours will differ.)
 
 ## Image format (for anyone extending this)
 

@@ -40,6 +40,7 @@ DEAD_START, DEAD_END = 4, 15   # dead pixels at each end of every chip
 LINE = PLANE * 6
 DPI = 300
 TRIM = 110                     # mean brightness above which a row/column counts as paper
+LEVEL_BLACK, LEVEL_WHITE = 10, 245   # targets for per-chip levels (config "levels")
 
 DEFAULTS = {
     'paperless_url': 'http://localhost:8000',
@@ -53,6 +54,7 @@ DEFAULTS = {
     'poll_seconds': 1.0,
     'max_sheets': 200,
     'pause_scale': 1.0,        # experimental: <1 shortens the Windows driver's fixed pauses
+    'levels': None,            # optional per-chip black/white points, see apply_levels()
 }
 
 
@@ -177,8 +179,29 @@ class Scanner:
 
 
 # --- image handling -----------------------------------------------------------
-def decode_sides(raw):
-    """Turn one raw sheet into two upright, trimmed RGB arrays (side 0, side 1)."""
+def apply_levels(img, chip_levels):
+    """Per-chip levels: map each third's measured black/white point (per channel) to
+    LEVEL_BLACK/LEVEL_WHITE. chip_levels = {"left"|"middle"|"right": {"black": [r,g,b],
+    "white": [r,g,b]}}; thirds that are not listed are left alone. img must be untrimmed
+    (exactly three chips wide) and in final page orientation."""
+    import numpy as np
+    third = img.shape[1] // 3
+    v = np.arange(256, dtype=np.float32)
+    for k, name in enumerate(('left', 'middle', 'right')):
+        lv = chip_levels.get(name)
+        if not lv:
+            continue
+        cols = slice(k * third, (k + 1) * third)
+        for c in range(3):
+            b, w = float(lv['black'][c]), float(lv['white'][c])
+            lut = np.clip((v - b) / max(w - b, 1.0) * (LEVEL_WHITE - LEVEL_BLACK) + LEVEL_BLACK, 0, 255)
+            img[:, cols, c] = lut.astype(np.uint8)[img[:, cols, c]]
+    return img
+
+
+def decode_sides(raw, levels=None, front_side=1):
+    """Turn one raw sheet into two upright, trimmed RGB arrays (side 0, side 1).
+    levels: optional {"front": chip_levels, "back": chip_levels}, see apply_levels()."""
     import numpy as np
     extra = len(raw) % LINE
     if extra in (4, 8):          # stray status bytes captured ahead of the image
@@ -196,6 +219,9 @@ def decode_sides(raw):
         img = np.stack(chans, axis=2)[::-1]                     # upright: both sensors deliver upside down
         if side == 1:
             img = img[:, ::-1]                                   # side 1's sensor also mirrors left-right
+        chip_levels = (levels or {}).get('front' if side == front_side else 'back')
+        if chip_levels:
+            img = apply_levels(np.ascontiguousarray(img), chip_levels)
         # trim to the paper: rows/columns brighter than TRIM count as paper. The strip a
         # sensor sees before the paper arrives reads ~70, paper ~220+, dense text rows ~180.
         bright = img.mean(axis=2)
@@ -229,7 +255,8 @@ def decode(raw, out_prefix):
     """decode mode: write both sides as PNG."""
     from PIL import Image
     paths = []
-    for side, img in enumerate(decode_sides(raw)):
+    cfg = load_config()
+    for side, img in enumerate(decode_sides(raw, cfg['levels'], cfg['front_side'])):
         path = f'{out_prefix}_side{side}.png'
         Image.fromarray(img).save(path, dpi=(DPI, DPI))
         log(f'  side {side}: {img.shape[1]}x{img.shape[0]} -> {path}  (ink {ink_percent(img):.2f}%)')
@@ -307,7 +334,7 @@ def scan_stack(s, seq, cfg):
 
     def process(raw, idx):
         """Decode, drop blank sides and save JPEGs - runs while the next sheet scans."""
-        sides = decode_sides(raw)
+        sides = decode_sides(raw, cfg['levels'], cfg['front_side'])
         pair = []
         for k, side in enumerate(order):
             img = sides[side]
