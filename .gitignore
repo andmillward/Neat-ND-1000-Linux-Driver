@@ -1,0 +1,16 @@
+# local settings (holds the Paperless API token)
+config.json
+
+# scan output and debugging artifacts
+output/
+out/
+*.raw
+*.bin
+*.png
+*.jpg
+*.pdf
+*.pcap
+*.pcapng
+
+__pycache__/
+*.pyc

@@ -1,0 +1,2 @@
+# Neat ND-1000 sheet-fed scanner: let members of the plugdev group use it without sudo.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f44", ATTR{idProduct}=="0050", MODE="0660", GROUP="plugdev"

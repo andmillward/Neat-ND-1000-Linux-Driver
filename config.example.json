@@ -1,0 +1,10 @@
+{
+  "paperless_url": "http://localhost:8000",
+  "token": "",
+  "front_side": 1,
+  "reverse_sheets": true,
+  "skip_blank": true,
+  "blank_threshold": 0.1,
+  "jpeg_quality": 80,
+  "pause_scale": 1.0
+}

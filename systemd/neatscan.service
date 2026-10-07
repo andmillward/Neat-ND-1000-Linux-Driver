@@ -1,0 +1,17 @@
+[Unit]
+Description=Neat ND-1000 scanner (scan each stack loaded into the feeder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Change these to the account and folder you installed neatscan into.
+# The account needs access to the scanner (see 60-neat-nd1000.rules).
+User=scanner
+WorkingDirectory=/opt/neatscan
+ExecStart=/usr/bin/python3 /opt/neatscan/neatscan.py watch
+# watch mode already waits out scanner disconnects; this covers anything else.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
