@@ -55,6 +55,7 @@ DEFAULTS = {
     'max_sheets': 200,
     'pause_scale': 1.0,        # experimental: <1 shortens the Windows driver's fixed pauses
     'levels': None,            # optional per-chip black/white points, see apply_levels()
+    'refresh_minutes': 2,      # re-run the setup sequence this often while idle (0 = never)
 }
 
 
@@ -399,39 +400,61 @@ def watch():
     os.makedirs(cfg['output_dir'], exist_ok=True)
     seq = {name: load(f'{name}.jsonl') for name in ('check', 'first', 'next', 'release')}
     can_upload = bool(cfg['token']) and not cfg['token'].startswith('PASTE')
-    waiting = False
+    failures, last_report = 0, 0.0
     while True:
+        s = None
         try:
             s = Scanner()
-        except (LookupError, usb.core.USBError) as e:
-            if not waiting:
-                log(f'scanner not available ({e}); waiting for it to be connected')
-                waiting = True
-            time.sleep(5)
-            continue
-        waiting = False
-        try:
             s.pause_scale = float(cfg['pause_scale'])
             s.replay(seq['check'])
             log(f'watching feeder (upload: {cfg["paperless_url"] if can_upload else "off - no token in config.json"}'
-                + (f', pause_scale {s.pause_scale}' if s.pause_scale != 1.0 else '') + ')')
+                + (f', pause_scale {s.pause_scale}' if s.pause_scale != 1.0 else '')
+                + (f'; recovered after {failures} attempt(s)' if failures else '') + ')')
+            failures = 0
             watch_feeder(s, seq, cfg, can_upload)
-        except usb.core.USBError as e:
-            log(f'scanner disconnected or stopped responding ({e}); waiting for it to come back')
-            try:
-                usb.util.dispose_resources(s.dev)   # free the stale handle before reconnecting
-            except Exception:
-                pass
-            waiting = True
+        except (LookupError, usb.core.USBError) as e:
+            failures += 1
+            # one line when it starts, then a reminder once a minute while it keeps failing
+            if failures == 1 or time.time() - last_report > 60:
+                log(f'scanner not responding ({e}); attempt {failures}, '
+                    + ('resetting it and retrying' if not isinstance(e, LookupError) else 'waiting for it to be connected'))
+                last_report = time.time()
+            if s is not None:
+                try:
+                    usb.util.dispose_resources(s.dev)   # free the stale handle before reconnecting
+                except Exception:
+                    pass
+            if not isinstance(e, LookupError):
+                reset_scanner()   # a hung chip still enumerates; a USB reset revives it like a replug
             time.sleep(5)
 
 
+def reset_scanner():
+    """USB port reset of the scanner (same effect as unplugging and replugging it)."""
+    import usb.core
+    try:
+        dev = usb.core.find(idVendor=VID, idProduct=PID)
+        if dev is not None:
+            dev.reset()
+            time.sleep(3)    # give it time to re-enumerate
+    except Exception as e:
+        log(f'  USB reset failed: {e}')
+
+
 def watch_feeder(s, seq, cfg, can_upload):
-    """Wait for paper and scan stacks until the scanner goes away (USBError)."""
+    """Wait for paper and scan stacks until the scanner goes away (USBError).
+    While idle, re-run the setup sequence every refresh_minutes, as the Windows driver
+    re-initializes the chip on every check; register reads alone for long stretches
+    preceded the scanner hanging."""
+    last_setup = time.time()
     while True:
         if not s.paper_present():
+            if cfg['refresh_minutes'] and time.time() - last_setup > cfg['refresh_minutes'] * 60:
+                s.replay(seq['check'])
+                last_setup = time.time()
             time.sleep(cfg['poll_seconds'])
             continue
+        last_setup = time.time()
         stamp = time.strftime('%Y-%m-%d_%H%M%S')
         log('paper detected, scanning stack...')
         pages, work, had_error = scan_stack(s, seq, cfg)

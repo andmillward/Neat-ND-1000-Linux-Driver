@@ -60,7 +60,8 @@ python3 neatscan.py decode RAW OUT   # decode a saved raw sheet into two PNGs
 ```
 
 `watch` keeps running if the scanner is unplugged or switched off and picks it up
-again when it returns. If a stack fails part-way, the pages scanned so far are saved
+again when it returns. If the scanner stops answering while still connected, it is
+reset over USB (the same as a replug) and set up again. If a stack fails part-way, the pages scanned so far are saved
 with `CHECK - scan error` in the name.
 
 ## Configuration (`config.json`)
@@ -76,6 +77,7 @@ with `CHECK - scan error` in the name.
 | `jpeg_quality` | `80` | JPEG quality of the pages in the PDF |
 | `pause_scale` | `1.0` | experimental: replay the Windows driver's fixed pauses shorter. `0.5` worked well in testing (about 13 s per sheet instead of 15-16 s) |
 | `levels` | none | per-chip correction for uneven calibration, see below |
+| `refresh_minutes` | `2` | re-run the setup sequence this often while idle, as the Windows driver does on every check (`0` = never) |
 
 ### Per-chip levels
 
