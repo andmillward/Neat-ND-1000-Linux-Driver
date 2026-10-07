@@ -122,8 +122,9 @@ Thirds or sides you leave out are not changed.
   `C:\Users\Public\Documents\Neat ADF Scanner\<serial><dpi>_<channel>_Channel.bin`;
   the file contents (after a 6-byte header) are exactly what gets uploaded, so
   swapping them into the sequences would be the way to support other units.
-- One mode only: 300 DPI, color, duplex, letter-length pages. Longer pages are cut
-  at ~11.4 in.
+- One mode only: 300 DPI, color, duplex. The recorded sequences read ~11.4 in per
+  page; for longer pages the tool keeps reading while the chip still reports that it
+  is scanning (experimental, logged as "long page").
 - The physical Scan/PDF buttons are not supported yet (the device has an interrupt
   endpoint, `0x83`, that likely reports them).
 - Tested with one scanner.

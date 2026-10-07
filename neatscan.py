@@ -140,6 +140,7 @@ class Scanner:
         prev_t = ops[0]['t'] if ops else 0
         bulk_size = 0   # size announced by the last bulk-read header; 4-byte reads are status, not image
         timeouts = 0
+        last_image = last_image_read(ops) if capture is not None else -1
         while i < n:
             self._at = i
             op = ops[i]
@@ -190,10 +191,51 @@ class Scanner:
                 if capture is not None and bulk_size > 4:
                     capture.append(data)
                 prev_t = op['t']
+                if i == last_image:
+                    self.drain_long_page(capture)
                 i += 1
             else:
                 raise ValueError(f'unknown op {kind}')
         return timeouts
+
+    def drain_long_page(self, capture, chunk_lines=8, max_lines=8000):
+        """The recordings read a fixed ~11.4 in per page. After the last recorded chunk the
+        chip reports idle (0x71) on letter paper; if it still reports scanning (bit 1 set,
+        0x33 while data flows), the page is longer: keep reading in the driver's 8-line
+        chunks until it finishes, so the rest of the page isn't lost or left in the chip."""
+        status = self.read_reg40()
+        if not status & 0x02:
+            return
+        size = chunk_lines * LINE
+        header = b'\x00\x00\x00\x10' + size.to_bytes(4, 'little')
+        extra = 0
+        while extra < max_lines:
+            status = self.read_reg40()
+            if not status & 0x02:
+                break
+            self.dev.ctrl_transfer(0x40, 4, 0x82, 0, header, timeout=5000)
+            got = 0
+            # the Windows driver reads each chunk as a multiple of 512 bytes plus the remainder
+            for part in (size - size % 512, size % 512):
+                if part:
+                    data = bytes(self.dev.read(EP_IN, part, timeout=15000))
+                    capture.append(data)
+                    got += len(data)
+            extra += got // LINE
+        log(f'  long page: scanner kept scanning after the recorded length; read {extra} extra lines '
+            f'({extra / DPI:.1f} in), final status {status:#04x}')
+
+
+def last_image_read(ops):
+    """Index of the last bulk read in a sequence that carries image data (its header
+    announced more than 4 bytes), or -1."""
+    bulk_size, last = 0, -1
+    for k, op in enumerate(ops):
+        if op['op'] == 'co' and op['rq'] == 4 and op['v'] == 0x82 and op['i'] == 0 and len(op['d']) == 16:
+            bulk_size = int.from_bytes(bytes.fromhex(op['d'])[4:8], 'little')
+        elif op['op'] == 'bi' and bulk_size > 4:
+            last = k
+    return last
 
 
 # --- image handling -----------------------------------------------------------
