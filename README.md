@@ -83,7 +83,8 @@ with `CHECK - scan error` in the name.
 - Inside a plane the three sensor chips are byte-interleaved: byte `j` belongs to chip
   slot `j % 3` at position `j // 3`; across the page the chips are in slot order 2, 0, 1.
 - Each 882-pixel chip has 4 dead pixels at the start and 15 at the end.
-- The image arrives upside down and mirrored.
+- Both sides arrive upside down; side B (raw planes 3-5) is also mirrored left-right,
+  side A is not (the two sensors face each other).
 - Status register `0x40` bit 7 is the tray sensor (set = no paper).
 - Shading correction is done by the chip from tables uploaded before every sheet.
 

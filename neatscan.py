@@ -193,7 +193,9 @@ def decode_sides(raw):
         for c in range(3):
             plane = a[:, side * 3 + c]                         # lines x positions x chip slots
             chans.append(np.concatenate([plane[:, keep, slot] for slot in CHIP_ORDER], axis=1))
-        img = np.stack(chans, axis=2)[::-1, ::-1]               # upright: flip both axes
+        img = np.stack(chans, axis=2)[::-1]                     # upright: both sensors deliver upside down
+        if side == 1:
+            img = img[:, ::-1]                                   # side 1's sensor also mirrors left-right
         # trim to the paper: rows/columns brighter than TRIM count as paper. The strip a
         # sensor sees before the paper arrives reads ~70, paper ~220+, dense text rows ~180.
         bright = img.mean(axis=2)
