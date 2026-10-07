@@ -140,11 +140,18 @@ class Scanner:
         prev_t = ops[0]['t'] if ops else 0
         bulk_size = 0   # size announced by the last bulk-read header; 4-byte reads are status, not image
         timeouts = 0
-        last_image = last_image_read(ops) if capture is not None else -1
+        first_image, last_image = image_span(ops) if capture is not None else (-1, -1)
         while i < n:
             self._at = i
             op = ops[i]
             kind = op['op']
+            if i == first_image:
+                # replace the recorded fixed-length read loop with one that follows the
+                # chip: pages are as long as the paper, not as long as the recording
+                self.read_image(capture)
+                prev_t = ops[last_image]['t']
+                i = last_image + 1
+                continue
             # bulk-in ops are timestamped when the transfer finished, so the gap before
             # one is transfer time (which the read itself takes), not a pause to copy
             gap = op['t'] - prev_t
@@ -191,51 +198,77 @@ class Scanner:
                 if capture is not None and bulk_size > 4:
                     capture.append(data)
                 prev_t = op['t']
-                if i == last_image:
-                    self.drain_long_page(capture)
                 i += 1
             else:
                 raise ValueError(f'unknown op {kind}')
         return timeouts
 
-    def drain_long_page(self, capture, chunk_lines=8, max_lines=8000):
-        """The recordings read a fixed ~11.4 in per page. After the last recorded chunk the
-        chip reports idle (0x71) on letter paper; if it still reports scanning (bit 1 set,
-        0x33 while data flows), the page is longer: keep reading in the driver's 8-line
-        chunks until it finishes, so the rest of the page isn't lost or left in the chip."""
-        status = self.read_reg40()
-        if not status & 0x02:
-            return
-        size = chunk_lines * LINE
-        header = b'\x00\x00\x00\x10' + size.to_bytes(4, 'little')
-        extra = 0
-        while extra < max_lines:
-            status = self.read_reg40()
-            if not status & 0x02:
+    def buffer_level(self):
+        """Registers 0x42-0x44: how much scanned data waits in the chip, in units of
+        ~3 KB (it rises while scanning and falls by ~41 per 8 lines read)."""
+        r = self.dev.ctrl_transfer(0xC0, 4, 0x8E, 0x4222, 4, timeout=5000)
+        return ((r[0] & 0x0F) << 16) | (r[1] << 8) | r[2]
+
+    def read_lines(self, lines, capture):
+        size = lines * LINE
+        self.dev.ctrl_transfer(0x40, 4, 0x82, 0, b'\x00\x00\x00\x10' + size.to_bytes(4, 'little'), timeout=5000)
+        # the Windows driver reads each chunk as a multiple of 512 bytes plus the remainder
+        for part in (size - size % 512, size % 512):
+            if part:
+                capture.append(bytes(self.dev.read(EP_IN, part, timeout=30000)))
+
+    def read_image(self, capture, chunk=8, max_lines=10000, timeout=60.0):
+        """Read one sheet the way the Windows driver does: 8-line chunks while the chip
+        is scanning (status bit 1) and enough data is buffered, then drain the buffer
+        line by line once the chip has stopped at the end of the paper.
+
+        When the paper's trailing edge passes the sensor (register 0xBF = 1, status
+        0x73), the driver acknowledges it with one command; the chip then scans a fixed
+        few more lines and stops. Sending it at the recorded time instead of when the
+        paper really ends is what cut long pages short."""
+        unit = 3072                                   # bytes per buffer-level unit
+        lines, last_data, paper_end = 0, time.time(), False
+        while lines < max_lines:
+            scanning = bool(self.read_reg40() & 0x02)
+            if not paper_end:
+                bf = self.dev.ctrl_transfer(0xC0, 4, 0x8E, 0xBF22, 2, timeout=5000)
+                if bf[0] & 0x01:
+                    self.dev.ctrl_transfer(0x40, 4, 0x8B, 6, b'\x00\x00\x10\x01', timeout=5000)
+                    self.dev.ctrl_transfer(0xC0, 4, 0x8A, 5, 4, timeout=5000)
+                    paper_end = True
+            level = self.buffer_level()
+            if not scanning and level == 0:
                 break
-            self.dev.ctrl_transfer(0x40, 4, 0x82, 0, header, timeout=5000)
-            got = 0
-            # the Windows driver reads each chunk as a multiple of 512 bytes plus the remainder
-            for part in (size - size % 512, size % 512):
-                if part:
-                    data = bytes(self.dev.read(EP_IN, part, timeout=15000))
-                    capture.append(data)
-                    got += len(data)
-            extra += got // LINE
-        log(f'  long page: scanner kept scanning after the recorded length; read {extra} extra lines '
-            f'({extra / DPI:.1f} in), final status {status:#04x}')
+            if level * unit >= chunk * LINE:
+                self.read_lines(chunk, capture)
+                lines += chunk
+                last_data = time.time()
+            elif not scanning:
+                self.read_lines(1, capture)           # tail of the page, after the chip stopped
+                lines += 1
+                last_data = time.time()
+            elif time.time() - last_data > timeout:
+                raise self.usb.core.USBTimeoutError('no image data from the scanner', -7, 110)
+            else:
+                time.sleep(0.005)
+        if not paper_end:
+            log(f'  note: no paper-end signal during this sheet ({lines} lines read)')
+        return lines
 
 
-def last_image_read(ops):
-    """Index of the last bulk read in a sequence that carries image data (its header
-    announced more than 4 bytes), or -1."""
-    bulk_size, last = 0, -1
+def image_span(ops):
+    """(first, last) op index of a sequence's recorded image-reading loop: from the
+    first bulk-read header announcing more than 4 bytes to the last image bulk read.
+    (-1, -1) if the sequence reads no image."""
+    bulk_size, first, last = 0, -1, -1
     for k, op in enumerate(ops):
         if op['op'] == 'co' and op['rq'] == 4 and op['v'] == 0x82 and op['i'] == 0 and len(op['d']) == 16:
             bulk_size = int.from_bytes(bytes.fromhex(op['d'])[4:8], 'little')
+            if bulk_size > 4 and first < 0:
+                first = k
         elif op['op'] == 'bi' and bulk_size > 4:
             last = k
-    return last
+    return first, last
 
 
 # --- image handling -----------------------------------------------------------
