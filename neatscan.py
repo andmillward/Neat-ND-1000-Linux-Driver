@@ -21,13 +21,16 @@ import io
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+STOP = threading.Event()       # set on SIGTERM: finish the current sheet, eject, release, exit
 VID, PID = 0x1F44, 0x0050
 EP_OUT, EP_IN = 0x02, 0x81
 
@@ -55,7 +58,7 @@ DEFAULTS = {
     'max_sheets': 200,
     'pause_scale': 1.0,        # experimental: <1 shortens the Windows driver's fixed pauses
     'levels': None,            # optional per-chip black/white points, see apply_levels()
-    'refresh_minutes': 2,      # re-run the setup sequence this often while idle (0 = never)
+    'refresh_minutes': 0,      # re-run the setup sequence this often while idle (0 = never)
 }
 
 
@@ -115,23 +118,37 @@ class Scanner:
     # --- replay --------------------------------------------------------------
     pause_scale = 1.0      # <1 replays the Windows driver's fixed pauses shorter (experimental)
 
-    def replay(self, ops, capture=None, poll_timeout=60.0):
+    def replay(self, ops, capture=None, poll_timeout=60.0, name='', fast=False):
         """Replay recorded ops. Runs of identical control reads are the Windows
         driver's polling loops: poll until the first byte matches the value the
-        loop ended on. Pauses longer than 3 ms between ops are reproduced.
+        loop ended on. Pauses longer than 3 ms between ops are reproduced, scaled
+        by pause_scale only when fast=True (the per-sheet scanning segments).
         Returns the number of polling loops that timed out."""
+        self._at = 0
+        try:
+            return self._replay(ops, capture, poll_timeout, fast)
+        except self.usb.core.USBError as e:
+            op = ops[self._at] if self._at < len(ops) else {}
+            log(f'  USB error in "{name}" sequence at step {self._at + 1} of {len(ops)} '
+                f'(op {op.get("op")} rq={op.get("rq")} v={op.get("v")} i={op.get("i")}): {e}')
+            raise
+
+    def _replay(self, ops, capture, poll_timeout, fast):
         i, n = 0, len(ops)
+        self._at = 0
+        scale = self.pause_scale if fast else 1.0
         prev_t = ops[0]['t'] if ops else 0
         bulk_size = 0   # size announced by the last bulk-read header; 4-byte reads are status, not image
         timeouts = 0
         while i < n:
+            self._at = i
             op = ops[i]
             kind = op['op']
             # bulk-in ops are timestamped when the transfer finished, so the gap before
             # one is transfer time (which the read itself takes), not a pause to copy
             gap = op['t'] - prev_t
             if gap > 0.003 and kind != 'bi':
-                time.sleep(min(gap, 2.0) * self.pause_scale)
+                time.sleep(min(gap, 2.0) * scale)
             if kind == 'co':
                 if op['rq'] == 4 and op['v'] == 0x82 and op['i'] == 0 and len(op['d']) == 16:
                     bulk_size = int.from_bytes(bytes.fromhex(op['d'])[4:8], 'little')
@@ -330,7 +347,7 @@ def scan_stack(s, seq, cfg):
     work = tempfile.mkdtemp(prefix='neatscan-')
     jobs = []              # per sheet: future -> [front_jpeg, back_jpeg] (None for blank sides)
     had_error = False
-    segment = seq['first']
+    seg_name = 'first'
     order = (cfg['front_side'], 1 - cfg['front_side'])
 
     def process(raw, idx):
@@ -353,7 +370,7 @@ def scan_stack(s, seq, cfg):
         t0 = time.time()
         chunks = []
         try:
-            timeouts = s.replay(segment, capture=chunks)
+            timeouts = s.replay(seq[seg_name], capture=chunks, name=seg_name, fast=True)
         except s.usb.core.USBError as e:
             log(f'  USB error during sheet {len(jobs) + 1} (jam or misfeed?): {e}')
             had_error = True
@@ -368,12 +385,15 @@ def scan_stack(s, seq, cfg):
         jobs.append(pool.submit(process, raw, len(jobs)))
         if timeouts:
             had_error = True
+        if STOP.is_set():
+            log('  stopping after this sheet (service is shutting down)')
+            break
         if not s.paper_present():
             break
-        segment = seq['next']
+        seg_name = 'next'
     try:
-        s.replay(seq['release'])  # eject the last sheet
-        s.replay(seq['check'])    # and leave the scanner idle the way Windows does
+        s.replay(seq['release'], name='release')  # eject the last sheet
+        s.replay(seq['check'], name='check')      # and leave the scanner idle the way Windows does
     except s.usb.core.USBError as e:
         log(f'  USB error while releasing the last sheet: {e}')
     sheets = []
@@ -392,21 +412,25 @@ def scan_stack(s, seq, cfg):
 
 
 def watch():
-    """Runs forever: survives the scanner being unplugged or switched off by waiting
-    for it to reappear, so the service never has to restart."""
+    """Runs until stopped: survives the scanner being unplugged, switched off or hung
+    (USB reset, then set up again). On SIGTERM/SIGINT it finishes the current sheet,
+    ejects, returns the chip to idle and releases the scanner before exiting."""
     import usb.core
     import usb.util
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: STOP.set())
     cfg = load_config()
     os.makedirs(cfg['output_dir'], exist_ok=True)
     seq = {name: load(f'{name}.jsonl') for name in ('check', 'first', 'next', 'release')}
     can_upload = bool(cfg['token']) and not cfg['token'].startswith('PASTE')
     failures, last_report = 0, 0.0
-    while True:
+    reset_scanner()   # start from a known-clean state, whatever the last run left behind
+    while not STOP.is_set():
         s = None
         try:
             s = Scanner()
             s.pause_scale = float(cfg['pause_scale'])
-            s.replay(seq['check'])
+            s.replay(seq['check'], name='check')
             log(f'watching feeder (upload: {cfg["paperless_url"] if can_upload else "off - no token in config.json"}'
                 + (f', pause_scale {s.pause_scale}' if s.pause_scale != 1.0 else '')
                 + (f'; recovered after {failures} attempt(s)' if failures else '') + ')')
@@ -414,19 +438,32 @@ def watch():
             watch_feeder(s, seq, cfg, can_upload)
         except (LookupError, usb.core.USBError) as e:
             failures += 1
+            hung = not isinstance(e, LookupError)
             # one line when it starts, then a reminder once a minute while it keeps failing
             if failures == 1 or time.time() - last_report > 60:
-                log(f'scanner not responding ({e}); attempt {failures}, '
-                    + ('resetting it and retrying' if not isinstance(e, LookupError) else 'waiting for it to be connected'))
+                if not hung:
+                    action = 'waiting for it to be connected'
+                elif failures < 3:
+                    action = 'resetting it over USB and retrying'
+                else:
+                    action = 'still stuck after USB resets - switch the scanner off and on'
+                log(f'scanner not responding ({e}); attempt {failures}, {action}')
                 last_report = time.time()
+            if hung:
+                reset_scanner()   # a hung chip still enumerates; a USB reset can revive it like a replug
+            if not STOP.is_set():
+                time.sleep(5)
+        finally:
             if s is not None:
                 try:
-                    usb.util.dispose_resources(s.dev)   # free the stale handle before reconnecting
+                    usb.util.release_interface(s.dev, 0)
                 except Exception:
                     pass
-            if not isinstance(e, LookupError):
-                reset_scanner()   # a hung chip still enumerates; a USB reset revives it like a replug
-            time.sleep(5)
+                try:
+                    usb.util.dispose_resources(s.dev)   # free the handle before reconnecting / exiting
+                except Exception:
+                    pass
+    log('stopped')
 
 
 def reset_scanner():
@@ -442,15 +479,14 @@ def reset_scanner():
 
 
 def watch_feeder(s, seq, cfg, can_upload):
-    """Wait for paper and scan stacks until the scanner goes away (USBError).
-    While idle, re-run the setup sequence every refresh_minutes, as the Windows driver
-    re-initializes the chip on every check; register reads alone for long stretches
-    preceded the scanner hanging."""
+    """Wait for paper and scan stacks until the scanner goes away (USBError) or the
+    service is stopped. Optionally re-runs the setup sequence every refresh_minutes
+    while idle (off by default)."""
     last_setup = time.time()
-    while True:
+    while not STOP.is_set():
         if not s.paper_present():
             if cfg['refresh_minutes'] and time.time() - last_setup > cfg['refresh_minutes'] * 60:
-                s.replay(seq['check'])
+                s.replay(seq['check'], name='check')
                 last_setup = time.time()
             time.sleep(cfg['poll_seconds'])
             continue

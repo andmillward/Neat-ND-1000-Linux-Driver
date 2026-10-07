@@ -61,7 +61,9 @@ python3 neatscan.py decode RAW OUT   # decode a saved raw sheet into two PNGs
 
 `watch` keeps running if the scanner is unplugged or switched off and picks it up
 again when it returns. If the scanner stops answering while still connected, it is
-reset over USB (the same as a replug) and set up again. If a stack fails part-way, the pages scanned so far are saved
+reset over USB (the same as a replug) and set up again; if that does not help, the log
+asks for a power cycle. When the service is stopped, it finishes the current sheet,
+ejects and releases the scanner before exiting, and it resets the scanner on startup. If a stack fails part-way, the pages scanned so far are saved
 with `CHECK - scan error` in the name.
 
 ## Configuration (`config.json`)
@@ -75,9 +77,9 @@ with `CHECK - scan error` in the name.
 | `reverse_sheets` | `true` | loaded per the tray diagram, the last sheet is fed first |
 | `skip_blank` / `blank_threshold` | `true` / `0.1` | drop sides with less than 0.1 % dark pixels |
 | `jpeg_quality` | `80` | JPEG quality of the pages in the PDF |
-| `pause_scale` | `1.0` | experimental: replay the Windows driver's fixed pauses shorter. `0.5` worked well in testing (about 13 s per sheet instead of 15-16 s) |
+| `pause_scale` | `1.0` | experimental: replay the Windows driver's fixed pauses shorter while scanning sheets (setup and eject always run at the original timing). `0.5` worked well in testing (about 13 s per sheet instead of 15-16 s) |
 | `levels` | none | per-chip correction for uneven calibration, see below |
-| `refresh_minutes` | `2` | re-run the setup sequence this often while idle, as the Windows driver does on every check (`0` = never) |
+| `refresh_minutes` | `0` | re-run the setup sequence this often while idle (`0` = never) |
 
 ### Per-chip levels
 
