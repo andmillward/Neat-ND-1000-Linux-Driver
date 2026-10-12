@@ -14,6 +14,7 @@ Modes:
   probe            set up the scanner and print the paper sensor once a second
   scan-one OUTDIR  wait for paper, scan one sheet, save raw + decoded pages
   decode RAW OUT   decode a saved raw sheet into two page images
+  buttons          report chip registers / interrupt data that change when buttons are pressed
 
 Settings for watch mode are read from config.json next to this file.
 """
@@ -114,6 +115,27 @@ class Scanner:
 
     def paper_present(self):
         return not (self.read_reg40() & 0x80)
+
+    def read_all_registers(self):
+        """All 256 chip registers, read the way the Windows driver dumps them (64 at a
+        time, starting at 0x01, 0x40, 0x7F, 0xBE and 0xFD), plus the two registers it
+        reads through the other request type (12). Returns {name: value}."""
+        regs = {}
+        for start, n in ((0x01, 64), (0x40, 64), (0x7F, 64), (0xBE, 64), (0xFD, 4)):
+            data = self.dev.ctrl_transfer(0xC0, 4, 0x8E, (start << 8) | 0x22, n, timeout=5000)
+            for k, v in enumerate(data[:n - 1]):       # last byte of each read is a marker
+                if start + k <= 0xFF:
+                    regs[f'reg {start + k:02X}'] = v
+        for idx in (0x0B, 0x21):
+            regs[f'r12 {idx:02X}'] = self.dev.ctrl_transfer(0xC0, 12, 0x8E, idx, 1, timeout=5000)[0]
+        return regs
+
+    def read_interrupt(self, timeout_ms=20):
+        """Data from interrupt endpoint 0x83, or b'' if nothing arrived."""
+        try:
+            return bytes(self.dev.read(0x83, 64, timeout=timeout_ms))
+        except self.usb.core.USBTimeoutError:
+            return b''
 
     # --- replay --------------------------------------------------------------
     pause_scale = 1.0      # <1 replays the Windows driver's fixed pauses shorter (experimental)
@@ -587,7 +609,7 @@ def watch_feeder(s, seq, cfg, can_upload):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('watch', 'probe', 'scan-one', 'decode'):
+    if len(sys.argv) < 2 or sys.argv[1] not in ('watch', 'probe', 'scan-one', 'decode', 'buttons'):
         sys.exit(__doc__)
     mode = sys.argv[1]
 
@@ -608,6 +630,34 @@ def main():
     log('setting up scanner (replaying the Windows check sequence)')
     s.replay(check)
     log(f'setup done; status register 0x40 = {s.read_reg40():#04x}')
+
+    if mode == 'buttons':
+        log('learning which registers change on their own (5 s) - do not touch the scanner')
+        base = s.read_all_registers()
+        noisy = set()
+        end = time.time() + 5
+        while time.time() < end:
+            now = s.read_all_registers()
+            noisy |= {k for k, v in now.items() if v != base[k]}
+            s.read_interrupt()
+            time.sleep(0.05)
+        log(f'  ignoring {len(noisy)} register(s) that change by themselves: {", ".join(sorted(noisy)) or "none"}')
+        log('now press SCAN a few times, wait, then PDF a few times (60 s)')
+        last = s.read_all_registers()
+        end = time.time() + 60
+        while time.time() < end:
+            data = s.read_interrupt()
+            if data:
+                log(f'  interrupt endpoint 0x83: {data.hex()}')
+            now = s.read_all_registers()
+            changes = [f'{k}: {last[k]:02x}->{v:02x} ({last[k]:08b}->{v:08b})'
+                       for k, v in now.items() if k not in noisy and v != last[k]]
+            if changes:
+                log('  ' + '; '.join(changes))
+            last = now
+            time.sleep(0.03)
+        log('buttons probe finished')
+        return
 
     if mode == 'probe':
         log('reporting the paper sensor for 30 s - put a sheet in and take it out')

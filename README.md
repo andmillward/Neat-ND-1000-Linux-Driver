@@ -57,6 +57,7 @@ python3 neatscan.py watch            # wait for paper; scan each stack to one PD
 python3 neatscan.py probe            # set up the scanner and report the paper sensor for 30 s
 python3 neatscan.py scan-one OUTDIR  # scan one sheet, save raw data + decoded pages
 python3 neatscan.py decode RAW OUT   # decode a saved raw sheet into two PNGs
+python3 neatscan.py buttons          # report what changes in the chip when buttons are pressed
 ```
 
 `watch` keeps running if the scanner is unplugged or switched off and picks it up
@@ -110,7 +111,12 @@ Thirds or sides you leave out are not changed.
 - Each 882-pixel chip has 4 dead pixels at the start and 15 at the end.
 - Both sides arrive upside down; side B (raw planes 3-5) is also mirrored left-right,
   side A is not (the two sensors face each other).
-- Status register `0x40` bit 7 is the tray sensor (set = no paper).
+- Status register `0x40` bit 7 is the tray sensor (set = no paper), bit 1 is set
+  while the chip is scanning, bit 6 when the paper's trailing edge has passed.
+- Registers `0x42`-`0x44` are the image buffer fill level (~3 KB units). Pages are
+  read in 8-line chunks while data is buffered; when register `0xBF` reports the
+  paper end, the driver acknowledges it (request 4, value `0x8B`, index 6) and the
+  chip stops a few lines later.
 - Shading correction is done by the chip from tables uploaded before every sheet.
 
 ## Limitations
@@ -122,11 +128,11 @@ Thirds or sides you leave out are not changed.
   `C:\Users\Public\Documents\Neat ADF Scanner\<serial><dpi>_<channel>_Channel.bin`;
   the file contents (after a 6-byte header) are exactly what gets uploaded, so
   swapping them into the sequences would be the way to support other units.
-- One mode only: 300 DPI, color, duplex. The recorded sequences read ~11.4 in per
-  page; for longer pages the tool keeps reading while the chip still reports that it
-  is scanning (experimental, logged as "long page").
-- The physical Scan/PDF buttons are not supported yet (the device has an interrupt
-  endpoint, `0x83`, that likely reports them).
+- One mode only: 300 DPI, color, duplex. Page length follows the paper (tested with
+  letter and legal pages).
+- The physical Scan/PDF buttons are not supported yet. `neatscan.py buttons` reports
+  which chip registers or interrupt-endpoint (`0x83`) data change when they are
+  pressed (stop the service first; it should not share the scanner with another process).
 - Tested with one scanner.
 
 ## Re-recording the sequences
